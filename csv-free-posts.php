@@ -9,26 +9,36 @@ Author: Kazuki Matsui
 Author URI:
 */
 
-$csv_free_posts = new CsvFreePosts();
 class CsvFreePosts
 {
     //パス
-    private $path;
-    private $full_path;
+    public static $path;
+    public static $full_path;
+    public static $update_csv_path;
+
     //GETデータ
-    private $get_data;
+    public static $get_data;
+
     //エクスポート
     private $export_html;
     private $export_post_data;
     private $key_items = array('ID', 'post_title', 'post_name', 'post_content', 'post_category', 'tags_input', 'post_type');
     private $export_csv_file;
-    //CSV取得
-    private $csv_update_array = array();
 
-
-    //設定ページ
-    public function __construct()
+    //実行
+    public function init_actions()
     {
+
+        //外部ファイル
+        add_action('admin_enqueue_scripts', array(__CLASS__, 'my_scripts_method'));
+
+        //メニュー
+        add_action('admin_menu', array(__CLASS__, 'csv_free_menu'));
+
+        //プラグインまでのパスを準備しておく
+        self::$path = WP_PLUGIN_URL.'/'.str_replace(basename(__FILE__), '', plugin_basename(__FILE__));
+        self::$full_path = plugin_dir_path(__FILE__);
+
         //GETデータ取得用のフィルター
         $args = array(
             'alert_message' => array(
@@ -48,43 +58,19 @@ class CsvFreePosts
                 'filter' => FILTER_SANITIZE_STRING,
             ),
         );
-        $this->get_data = filter_input_array(INPUT_GET, $args);
-        
-        //プラグインまでのパスを準備しておく
-        $this->full_path = plugin_dir_path(__FILE__);
-        $this->path = WP_PLUGIN_URL.'/'.str_replace(basename(__FILE__), '', plugin_basename(__FILE__));
+        self::$get_data = filter_input_array(INPUT_GET, $args);
 
-        if ($this->get_data['_wpnonce_csv_free_posts']) {
-            $this->update_csv_path = WP_CONTENT_DIR . $this->get_data['import'];
-            add_action('init', array($this, 'get_csv_array'));
-        }
-
-        add_action('admin_menu', array($this, 'csv_free_menu'));
-        add_action('admin_enqueue_scripts', array($this, 'my_scripts_method'));
+        //インポートの実行
+        require_once('includes/import-class.php');
+        $import_class = new ImportClass();
     }
 
 
-    //インサートの実行
+    //ページの設定
     public function csv_free_menu()
     {
-        add_menu_page('Csv Free Posts', 'Csv Free Posts', 'manage_options', 'csv_free_posts', array($this, 'csv_free_posts'), 'dashicons-welcome-learn-more', 80);
-        add_submenu_page('csv_free_posts', 'エクスポート', 'エクスポート', 'manage_options', 'csv_free_posts_sub_export', array($this, 'csv_free_posts_sub_export'));
-    }
-
-
-    //アップデート
-    public function csv_free_posts()
-    {
-        if ($this->get_data['alert_message']) {
-            $redirect = remove_query_arg('alert_message');
-            print <<< EOT
-            <script>
-                alert("{$this->get_data[alert_message]}");
-                location.href="{$redirect}";
-            </script>
-EOT;
-        }
-        include 'include/update.php';
+        add_menu_page('Csv Free Posts', 'Csv Free Posts', 'manage_options', 'csv_free_posts', array('ImportClass', 'csv_free_posts'), 'dashicons-welcome-learn-more', 80);
+        //add_submenu_page('csv_free_posts', 'エクスポート', 'エクスポート', 'manage_options', 'csv_free_posts_sub_export', array($this, 'csv_free_posts_sub_export'));
     }
 
 
@@ -111,7 +97,7 @@ EOT;
         unset($v);
         $post_typ_tag .= '<p class="description">(選択した投稿タイプがエクスポートされます)</p></fieldset></td></tr>';
         $this->export_items();
-        include 'include/export.php';
+        require_once('includes/export.php');
     }
 
 
@@ -203,7 +189,7 @@ EOT;
     public function my_scripts_method()
     {
         wp_enqueue_media();
-        wp_enqueue_script('my_admin_script', $this->path.'/assets/js/functions.js', array('jquery'), '', true);
+        wp_enqueue_script('my_admin_script', self::$path . '/assets/js/functions.js', array('jquery'), '', true);
         if (function_exists('wp_add_inline_script')) {
             $content_url = content_url();
             $tag = <<<EOT
@@ -214,112 +200,6 @@ EOT;
             wp_add_inline_script('my_admin_script', $tag, 'after');
         }
     }
-
-
-    //csvの取得
-    public function get_csv_array()
-    {
-        $csv_key = array();
-        $csv_val = array();
-        if (file_exists($this->update_csv_path)) {
-            $fp = new SplFileObject($this->update_csv_path);
-            $fp->setFlags(SplFileObject::READ_CSV);
-            $c = 0;
-            foreach ($fp as $line) {
-                if ($c == 0) {
-                    $csv_key = $line;
-                } else {
-                    $csv_val[] = $line;
-                }
-                $c ++;
-            }
-            unset($line);
-
-            $c = 0;
-            foreach ($csv_val as $value) {
-                $key_c = 0;
-                foreach ($csv_key as $key) {
-                    if ($key == 'ID') {
-                        $error_id = 1;
-
-                        //IDの有無・正誤のチェック
-                        if ($value[$key_c]) {
-                            $post_data = get_post($value[$key_c]);
-                        } else {
-                            $post_data = false;
-                        }
-
-                        if ($post_data == false) {
-                            $value[$key_c] = 'error';
-                        }
-                    }
-                    $this->csv_update_array[$c][$key] = $value[$key_c];
-                    $key_c ++;
-                }
-                unset($key);
-                $c ++;
-            }
-            unset($value);
-
-            //更新の実行
-            $this->update_post();
-        }
-    }
-
-
-    //投稿のアップデート
-    private function update_post()
-    {
-        $nonce = $_REQUEST['_wpnonce_csv_free_posts'];
-        $nonce_check = wp_verify_nonce($nonce, 'nonce_csv_free_posts');
-        if (!$nonce_check) {
-            $this->alert_message = '不正な投稿を検知しました。';
-        } else {
-            $c = 0;
-            $resurt = array();
-            foreach ($this->csv_update_array as $v) {
-
-                //カテゴリー
-                if (!isset($v['post_category'])) {
-                    $v['post_category'] = '';
-                }
-                $v['post_category'] = explode(';', $v['post_category']);
-
-                //タグ
-                if (!isset($v['tags_input'])) {
-                    $v['tags_input'] = '';
-                }
-                $v['tags_input'] = explode(';', $v['tags_input']);
-
-                $my_post = array(
-                    'post_title' => $v['post_title'],
-                    'post_name' => $v['post_name'],
-                    'post_content' => $v['post_content'],
-                    'post_status' => 'publish',
-                    'post_category' => $v['post_category'],
-                    'tags_input' => $v['tags_input'],
-                    'post_type' => $v['post_type'],
-                );
-
-                //idがerrorじゃなければ投稿の編集
-                if ($v['ID'] != 'error') {
-                    $my_post['ID'] = $v['ID'];
-                }
-                $resurt[] = wp_insert_post($my_post);
-            }
-            unset($k, $v);
-        
-            $error_count = array_count_values($resurt);
-            if (isset($error_count[0])) {
-                $this->alert_message = $error_count[0] . '件の更新エラーがありました。';
-            } else {
-                $this->alert_message = '更新が完了しました。';
-            }
-        }
-
-        //リダイレクトしてアラートの実行
-        $url = add_query_arg(array('page'=>'csv_free_posts', 'alert_message'=>$this->alert_message), $_SERVER['SCRIPT_NAME']);
-        wp_redirect($url);
-        exit;
-    }
 }
+
+add_action('plugins_loaded', array( 'CsvFreePosts', 'init_actions' ));
